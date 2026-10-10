@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.spec
+config.json
+图片/
+缓存/
+models/
+.workbuddy/
