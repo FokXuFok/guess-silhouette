@@ -269,3 +269,37 @@ def test_auto_mask_skips_not_ready_segmenter():
     res = im.auto_mask(rgb, segmenter=seg)
     assert seg.calls == 0  # 未就绪不应被调用
     assert res.tier == im.TIER_SOLID
+
+
+def test_ai_mask_polish_removes_far_specks_keeps_subject():
+    """AI 蒙版后处理:远离主体的背景碎片应被清除,主体保持完整。"""
+    rgb, gt = make_blob("solid")
+    h, w = gt.shape
+    mask = np.zeros((h, w), np.uint8)
+    mask[gt] = 255
+    mask[5:12, 5:12] = 255  # 角落 7x7 碎片(面积远小于阈值)
+    seg = _FakeSegmenter(mask)
+    res = im.auto_mask(rgb, segmenter=seg)
+    assert res.tier == im.TIER_AI
+    assert int((res.mask[5:12, 5:12] > 0).sum()) == 0  # 碎片被清除
+    assert iou(res.mask > 0, gt) > 0.9                 # 主体完好
+
+
+def test_ai_mask_polish_removes_lowfill_band():
+    """大而低填充的弧状条带(背景家具描边类误判)也应被清除。"""
+    import cv2
+
+    h, w = 480, 640
+    rgb = np.full((h, w, 3), 245, np.uint8)
+    mask = np.zeros((h, w), np.uint8)
+    cv2.circle(mask, (320, 300), 80, 255, -1)  # 主体:中心圆
+    band = np.array([[10, 60], [160, 140], [320, 40], [480, 140], [630, 60]], np.int32)
+    cv2.polylines(mask, [band], False, 255, 6)  # 顶部一条长波浪条带(远离主体)
+
+    seg = _FakeSegmenter(mask)
+    res = im.auto_mask(rgb, segmenter=seg)
+    assert res.tier == im.TIER_AI
+    assert int(res.mask[35:50, 310:330].max()) == 0  # 波浪峰值区被清除
+    circ = np.zeros((h, w), np.uint8)
+    cv2.circle(circ, (320, 300), 80, 255, -1)
+    assert iou(res.mask > 0, circ > 0) > 0.9  # 圆形主体保持完整

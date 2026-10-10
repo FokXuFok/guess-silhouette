@@ -25,7 +25,8 @@ MIN_ALPHA_FRACTION = 0.01    # alpha 图判定为"透明背景"的最小透明�
 DARK_SUBJECT_L = 55.0        # 主体亮度低于该值视为深色，揭晓时加描边
 AI_THRESHOLD = 0.4           # AI 蒙版二值化阈值（实测优于 0.5:浅色区域不被切碎）
 AI_MIN_COVER = 0.03          # AI 结果覆盖率低于此值视为失败,回落传统路径
-AI_MAX_COVER = 0.95          # 高于此值同样视为失败
+AI_MAX_COVER = 0.98          # 高于此值(几乎整图都是主体)视为失败
+AI_SMOOTH_SIGMA = 2.5        # AI 蒙版边缘平滑强度(基准,按分辨率缩放)
 
 
 @dataclass
@@ -129,7 +130,7 @@ def _ai_mask(rgba: np.ndarray, segmenter) -> MattingResult | None:
         soft = cv2.resize(soft, (rgb.shape[1], rgb.shape[0]),
                           interpolation=cv2.INTER_NEAREST)
     hard = soft.astype(np.uint8) >= int(AI_THRESHOLD * 255 + 0.5)
-    mask_bool = cleanup_mask(hard, fill_hole_ratio=0.5)
+    mask_bool = _polish_ai_mask(hard)
 
     cover = float(mask_bool.mean())
     if cover < AI_MIN_COVER or cover > AI_MAX_COVER:
@@ -137,6 +138,55 @@ def _ai_mask(rgba: np.ndarray, segmenter) -> MattingResult | None:
     confidence, needs_fix, reasons = _quality(mask_bool, TIER_AI)
     return MattingResult(mask=mask_bool.astype(np.uint8) * 255, tier=TIER_AI,
                          confidence=confidence, needs_fix=needs_fix, reasons=reasons)
+
+
+def _polish_ai_mask(mask_bool: np.ndarray) -> np.ndarray:
+    """AI 蒙版后处理:去远处碎片 → 填洞 → 去毛刺 → 平滑轮廓(剪影更干净)。
+
+    规则说明:
+    - 碎片:面积小于"主域 3%"且小于"整图 0.3%"的连通块视为背景误判,删除;
+    - 填洞:被主体包围的内部空洞(如脸部浅色区)全部填实,剪影保持实心;
+    - 平滑:高斯模糊 + 阈值,把 AI 上采样留下的台阶/毛刺抹平(强度随分辨率缩放)。
+    """
+    m = mask_bool.astype(np.uint8)
+    area_img = m.size
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE,
+                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(m, connectivity=8)
+    if n > 2:
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        order = np.argsort(areas)[::-1]
+        main_area = int(areas[order[0]])
+        keep = [int(1 + order[0])]
+        for idx in order[1:]:
+            a = int(areas[idx])
+            if a < max(main_area * 0.03, area_img * 0.003):
+                continue  # 小碎块:背景误判
+            w = int(stats[idx, cv2.CC_STAT_WIDTH])
+            h = int(stats[idx, cv2.CC_STAT_HEIGHT])
+            if a / max(w * h, 1) < 0.22:
+                continue  # 大而低填充的弧状/条带状块:背景边缘误判(如家具描边)
+            keep.append(int(1 + idx))
+        m = np.isin(labels, keep).astype(np.uint8)
+
+    inv = (1 - m).astype(np.uint8)
+    nn, ll, ss, _ = cv2.connectedComponentsWithStats(inv, connectivity=8)
+    if nn > 1:
+        border = set(int(i) for i in np.unique(np.concatenate(
+            [ll[0, :], ll[-1, :], ll[:, 0], ll[:, -1]])))
+        fill = [i for i in range(1, nn)
+                if i not in border and int(ss[i, cv2.CC_STAT_AREA]) < area_img * 0.5]
+        if fill:
+            m[np.isin(ll, fill)] = 1
+
+    m = cv2.morphologyEx(m, cv2.MORPH_OPEN,
+                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+
+    h, w = m.shape[:2]
+    sigma = max(2.0, min(5.0, min(h, w) / 1080.0 * AI_SMOOTH_SIGMA))
+    soft = cv2.GaussianBlur(m * 255, (0, 0), sigma)
+    return (soft >= 128).astype(bool)
 
 
 def mask_from_rect(rgba: np.ndarray, rect: tuple[int, int, int, int]) -> np.ndarray:

@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 STATE_VERSION = 1
-ALGO_VERSION = 3  # 抠图算法版本：升级后旧缓存整体重算，避免一直用旧效果
+ALGO_VERSION = 5  # 抠图算法版本：升级后旧缓存整体重算，避免一直用旧效果
 
 
 @dataclass
