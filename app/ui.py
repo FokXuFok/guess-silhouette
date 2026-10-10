@@ -4,6 +4,8 @@
 - 主页面：标题 + 【开始】【添加图片】两个选项 + 图片就绪状态
 - 游戏页：黑影/原图 + 答案；空格揭晓 → 再按空格下一题；ESC 或【结束本轮】回主页面
 - 完毕页：一轮全部展示完后提示，空格/ESC/按钮回主页面
+
+视觉：深色舞台感、单一强调色、精确间距；按钮为自绘圆角（悬停提亮 / 按下变暗）。
 """
 import logging
 import os
@@ -11,10 +13,11 @@ import queue
 import threading
 import time
 import tkinter as tk
+import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from .config import Config
 from .deck import Deck
@@ -24,16 +27,162 @@ from .store import Store
 
 log = logging.getLogger(__name__)
 
-BG = "#101014"
-FG = "#EAEAEA"
-FG_DIM = "#9A9AA5"
-FG_FAINT = "#6B6B75"
-ACCENT = "#4C8DFF"
+# ---------- 设计令牌(深色舞台:单一强调色 + 分层灰阶 + 发丝线) ----------
+BG = "#0E0F14"            # 窗口底
+SURFACE = "#15171E"       # 面板/顶栏
+SURFACE_2 = "#1C1F29"     # 次级控件底
+BORDER = "#242833"        # 发丝线
+FG = "#F2F3F7"            # 主文字
+FG_DIM = "#A7ABB8"        # 次级文字
+FG_FAINT = "#6C7080"      # 弱文字
+ACCENT = "#5B8DFF"        # 强调色(唯一)
+ACCENT_HOVER = "#6E9BFF"
+ACCENT_PRESS = "#4478E0"
+WARN = "#E0A84C"          # 提醒态
+ERROR = "#E0705F"         # 错误态
+BTN_BG = "#1E212B"        # 次级按钮
+BTN_HOVER = "#262A36"
+BTN_PRESS = "#181B23"
+DISABLED_BG = "#191B22"
 FONT = "Microsoft YaHei UI"
 
 HOME = "home"
 GAME = "game"
 DONE = "done"
+
+_round_cache: dict = {}
+
+
+def _shorten_path(path: str, max_chars: int = 30) -> str:
+    """顶栏路径显示:过长时保留尾部(文件夹名在末尾最重要)。"""
+    if len(path) <= max_chars:
+        return path
+    return "…" + path[-(max_chars - 1):]
+
+
+def _round_image(w: int, h: int, radius: int, fill: str) -> ImageTk.PhotoImage:
+    """生成抗锯齿圆角矩形图片(4x 超采样),按参数缓存。"""
+    key = (w, h, radius, fill)
+    img = _round_cache.get(key)
+    if img is not None:
+        return img
+    scale = 4
+    big = Image.new("RGBA", (w * scale, h * scale), (0, 0, 0, 0))
+    ImageDraw.Draw(big).rounded_rectangle(
+        (0, 0, w * scale - 1, h * scale - 1), radius * scale, fill=fill)
+    img = ImageTk.PhotoImage(big.resize((w, h), Image.LANCZOS))
+    _round_cache[key] = img
+    return img
+
+
+class FancyButton(tk.Canvas):
+    """自绘圆角按钮:悬停提亮、按下变暗、禁用降饱和。
+
+    兼容 `configure(state=...)` 与 `configure(text=...)`(与 tk.Button 用法一致)。
+    """
+
+    def __init__(self, master, text, command=None, *, primary=False, font_size=15,
+                 pad_x=30, pad_y=11, radius=None, parent_bg=BG, fixed_width=None):
+        super().__init__(master, highlightthickness=0, bd=0, bg=parent_bg, takefocus=0)
+        self._font = tkfont.Font(family=FONT, size=font_size,
+                                 weight="bold" if primary else "normal")
+        self._text = text
+        self._command = command
+        self._primary = primary
+        self._state = "normal"
+        self._hover = False
+        self._pressed = False
+        tw = self._font.measure(text)
+        th = self._font.metrics("linespace")
+        # 注意:不能叫 self._w/self._h——Tkinter 内部用 _w 存 widget 路径名
+        self._bw = fixed_width or (tw + pad_x * 2)
+        self._bh = th + pad_y * 2
+        self._radius = radius if radius is not None else min(14, self._bh // 3)
+        self.configure(width=self._bw, height=self._bh, cursor="hand2")
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+        self.bind("<ButtonPress-1>", self._on_press)
+        self.bind("<ButtonRelease-1>", self._on_release)
+        self._render()
+
+    # ---- 状态色 ----
+    def _colors(self):
+        if self._state == "disabled":
+            return DISABLED_BG, FG_FAINT
+        if self._primary:
+            if self._pressed:
+                return ACCENT_PRESS, "#FFFFFF"
+            if self._hover:
+                return ACCENT_HOVER, "#FFFFFF"
+            return ACCENT, "#FFFFFF"
+        if self._pressed:
+            return BTN_PRESS, FG
+        if self._hover:
+            return BTN_HOVER, FG
+        return BTN_BG, FG
+
+    def _render(self):
+        fill, fg = self._colors()
+        self.delete("all")
+        self.create_image(0, 0, anchor="nw",
+                          image=_round_image(self._bw, self._bh, self._radius, fill))
+        self.create_text(self._bw // 2, self._bh // 2 + 1, text=self._text,
+                         fill=fg, font=self._font)
+
+    # ---- 事件 ----
+    def _on_enter(self, _e=None):
+        if self._state == "disabled":
+            return
+        self._hover = True
+        self._render()
+
+    def _on_leave(self, _e=None):
+        self._hover = False
+        self._pressed = False
+        self._render()
+
+    def _on_press(self, _e=None):
+        if self._state == "disabled":
+            return
+        self._pressed = True
+        self._render()
+
+    def _on_release(self, _e=None):
+        if self._state == "disabled":
+            return
+        was = self._pressed
+        self._pressed = False
+        self._render()
+        if was and self._command is not None:
+            self._command()
+
+    # ---- 兼容 tk.Button 的 configure ----
+    def configure(self, cnf=None, **kw):
+        state = kw.pop("state", None)
+        if state is not None:
+            self.set_state(state)
+        text = kw.pop("text", None)
+        if text is not None:
+            self._text = text
+            self._render()
+        if cnf or kw:
+            super().configure(cnf, **kw)
+
+    config = configure
+
+    def set_state(self, state: str):
+        self._state = state
+        self.configure(cursor="hand2" if state != "disabled" else "")
+        self._render()
+
+    def set_text(self, text: str):
+        self._text = text
+        self._render()
+
+    def invoke(self):
+        """模拟点击(便于测试/脚本)。"""
+        if self._state != "disabled" and self._command is not None:
+            self._command()
 
 
 class App(tk.Tk):
@@ -78,26 +227,30 @@ class App(tk.Tk):
         center.place(relx=0.5, rely=0.46, anchor="center")
 
         tk.Label(center, text="猜 剪 影", bg=BG, fg=FG, font=(FONT, 64, "bold")).pack()
+        tk.Frame(center, bg=ACCENT, width=52, height=3).pack(pady=(16, 16))
         tk.Label(center, text="动漫社活动 · 投影猜角色", bg=BG, fg=FG_DIM,
-                 font=(FONT, 16)).pack(pady=(8, 30))
+                 font=(FONT, 15)).pack(pady=(0, 30))
 
-        self.home_status = tk.Label(center, text="正在检查图片…", bg=BG, fg="#BFD3FF",
+        status_row = tk.Frame(center, bg=BG)
+        status_row.pack(pady=(0, 26))
+        self.status_dot = tk.Canvas(status_row, width=8, height=8, bg=BG,
+                                    highlightthickness=0)
+        self._dot = self.status_dot.create_oval(0, 0, 8, 8, fill=FG_FAINT, outline="")
+        self.status_dot.pack(side="left", padx=(0, 9))
+        self.home_status = tk.Label(status_row, text="正在检查图片…", bg=BG, fg=FG_DIM,
                                     font=(FONT, 15))
-        self.home_status.pack(pady=(0, 26))
+        self.home_status.pack(side="left")
 
         row = tk.Frame(center, bg=BG)
         row.pack()
-        self.start_btn = tk.Button(row, text="开 始", command=self._btn(self.start_game), takefocus=0,
-                                   bg=ACCENT, fg="white", relief="flat", width=7, pady=14,
-                                   activebackground="#3B78E0", activeforeground="white",
-                                   disabledforeground="#5A6272", font=(FONT, 26, "bold"))
+        self.start_btn = FancyButton(row, text="开 始", command=self._btn(self.start_game),
+                                     primary=True, font_size=23, pad_x=52, pad_y=15)
         self.start_btn.pack(side="left", padx=10)
-        tk.Button(row, text="添加图片", command=self._btn(self.add_images), takefocus=0,
-                  bg="#24242C", fg=FG, relief="flat", width=7, pady=14,
-                  activebackground="#32323C", activeforeground=FG,
-                  font=(FONT, 26), padx=4).pack(side="left", padx=10)
+        self.add_btn = FancyButton(row, text="添加图片", command=self._btn(self.add_images),
+                                   font_size=23, pad_x=40, pad_y=15)
+        self.add_btn.pack(side="left", padx=10)
 
-        self.home_note = tk.Label(center, text="", bg=BG, fg="#E0A84C", font=(FONT, 12))
+        self.home_note = tk.Label(center, text="", bg=BG, fg=WARN, font=(FONT, 12))
         self.home_note.pack(pady=(20, 0))
 
         tk.Label(self.home_frame, text="空格 / 回车：开始 · F11：全屏开关 · Alt+F4：退出程序",
@@ -106,22 +259,26 @@ class App(tk.Tk):
     # ================= 游戏页 =================
 
     def _build_game(self):
-        # 顶部：文件夹 / 进度 / 状态 + 辅助按钮（全屏时隐藏）
-        self.top = tk.Frame(self, bg=BG)
-        self.folder_label = tk.Label(self.top, text=str(self.image_dir), bg=BG, fg=FG_DIM,
-                                     font=(FONT, 10))
-        self.folder_label.pack(side="left", padx=12, pady=8)
-        self.progress_label = tk.Label(self.top, text="", bg=BG, fg=FG, font=(FONT, 12, "bold"))
+        # 顶部：文件夹 / 进度 / 状态 + 辅助按钮（全屏时隐藏），底下一根发丝线
+        self.top = tk.Frame(self, bg=SURFACE)
+        inner = tk.Frame(self.top, bg=SURFACE)
+        inner.pack(fill="x")
+        self.folder_label = tk.Label(inner, text=_shorten_path(str(self.image_dir)),
+                                     bg=SURFACE, fg=FG_FAINT, font=(FONT, 10))
+        self.folder_label.pack(side="left", padx=(16, 8), pady=10)
+        self.progress_label = tk.Label(inner, text="", bg=SURFACE, fg=FG, font=(FONT, 12, "bold"))
         self.progress_label.pack(side="left", padx=8)
-        self.status_label = tk.Label(self.top, text="", bg=BG, fg=FG_DIM, font=(FONT, 10))
+        self.status_label = tk.Label(inner, text="", bg=SURFACE, fg=FG_DIM, font=(FONT, 10))
         self.status_label.pack(side="left", padx=8)
-        for text, cmd in (("选择文件夹", self.choose_folder),
-                          ("打开文件夹", self.open_folder),
-                          ("重新生成", self.regenerate),
-                          ("回主页面", lambda: self.end_round())):
-            tk.Button(self.top, text=text, command=self._btn(cmd), takefocus=0, bg="#24242C", fg=FG,
-                      relief="flat", activebackground="#32323C", activeforeground=FG,
-                      font=(FONT, 10), padx=8).pack(side="right", padx=(0, 8), pady=8)
+        for i, (text, cmd) in enumerate((("选择文件夹", self.choose_folder),
+                                         ("打开文件夹", self.open_folder),
+                                         ("重新生成", self.regenerate))):
+            # 最右按钮额外留白,避免被右上角悬浮的【结束本轮】盖住
+            pad_right = 168 if i == 0 else 8
+            FancyButton(inner, text=text, command=self._btn(cmd), font_size=10,
+                        pad_x=14, pad_y=6, parent_bg=SURFACE).pack(
+                side="right", padx=(0, pad_right), pady=8)
+        tk.Frame(self.top, bg=BORDER, height=1).pack(fill="x")
 
         # 中间：大图区域
         self.image_label = tk.Label(self, bg=BG, bd=0)
@@ -130,25 +287,19 @@ class App(tk.Tk):
         # 底部：答案 + 按钮
         self.bottom = tk.Frame(self, bg=BG)
         self.answer_label = tk.Label(self.bottom, text="", bg=BG, fg=FG, font=(FONT, 42, "bold"))
-        self.answer_label.pack(side="top", pady=(6, 4))
+        self.answer_label.pack(side="top", pady=(8, 6))
         self.buttons = tk.Frame(self.bottom, bg=BG)
         for text, cmd, accent in (("显示答案", self.reveal, True),
                                   ("下一题", self.next_question, False),
                                   ("跳过", self.skip, False),
                                   ("修正这张", lambda: self._open_editor(), False)):
-            tk.Button(self.buttons, text=text, command=self._btn(cmd), takefocus=0,
-                      bg=ACCENT if accent else "#24242C",
-                      fg="white" if accent else FG, relief="flat",
-                      activebackground="#3B78E0" if accent else "#32323C",
-                      activeforeground="white" if accent else FG,
-                      font=(FONT, 12, "bold" if accent else "normal"), padx=18, pady=6).pack(
-                side="left", padx=6)
+            FancyButton(self.buttons, text=text, command=self._btn(cmd), primary=accent,
+                        font_size=13, pad_x=22, pad_y=9).pack(side="left", padx=6)
 
         # 右上角：结束本轮（全屏时也可见，主持人也能用鼠标点）
-        self.finish_btn = tk.Button(self, text="结束本轮 (Esc)", command=self._btn(self.end_round),
-                                    takefocus=0, bg="#1E1E26", fg=FG_DIM, relief="flat",
-                                    activebackground="#33333E", activeforeground=FG,
-                                    font=(FONT, 10), padx=10, pady=4)
+        self.finish_btn = FancyButton(self, text="结束本轮 (Esc)",
+                                      command=self._btn(self.end_round),
+                                      font_size=10, pad_x=16, pad_y=7, parent_bg=BG)
 
     # ================= 展示完毕页 =================
 
@@ -158,12 +309,11 @@ class App(tk.Tk):
         center.place(relx=0.5, rely=0.45, anchor="center")
 
         tk.Label(center, text="本轮已全部展示完毕", bg=BG, fg=FG,
-                 font=(FONT, 40, "bold")).pack()
+                 font=(FONT, 44, "bold")).pack()
         self.done_sub = tk.Label(center, text="", bg=BG, fg=FG_DIM, font=(FONT, 16))
-        self.done_sub.pack(pady=(12, 30))
-        tk.Button(center, text="返回主页面", command=self._btn(self.end_round), takefocus=0,
-                  bg=ACCENT, fg="white", relief="flat", activebackground="#3B78E0",
-                  activeforeground="white", font=(FONT, 18, "bold"), padx=30, pady=10).pack()
+        self.done_sub.pack(pady=(14, 34))
+        FancyButton(center, text="返回主页面", command=self._btn(self.end_round),
+                    primary=True, font_size=18, pad_x=40, pad_y=12).pack()
 
         tk.Label(self.done_frame, text="按空格 / ESC 也可以返回主页面", bg=BG, fg=FG_FAINT,
                  font=(FONT, 11)).place(relx=0.5, rely=0.97, anchor="s")
@@ -313,6 +463,16 @@ class App(tk.Tk):
             self._img_cache[key] = img
         return img
 
+    def _set_answer(self, text: str):
+        """答案文字:名字过长时自动降字号,避免撑满屏幕。"""
+        if len(text) <= 8:
+            size = 42
+        elif len(text) <= 14:
+            size = 34
+        else:
+            size = 26
+        self.answer_label.configure(text=text, font=(FONT, size, "bold"))
+
     def _show_current(self, reset_reveal: bool = True):
         if self.deck is None or self.deck.current is None:
             return
@@ -329,7 +489,7 @@ class App(tk.Tk):
                                        fg=FG_DIM, font=(FONT, 14))
         else:
             self._fit_and_show()
-        self.answer_label.configure(text=entry.name if self.revealed else "？？？")
+        self._set_answer(entry.name if self.revealed else "？？？")
         self._update_progress()
 
     def _available_size(self):
@@ -470,7 +630,7 @@ class App(tk.Tk):
         if not path:
             return
         self.image_dir = Path(path)
-        self.folder_label.configure(text=str(self.image_dir))
+        self.folder_label.configure(text=_shorten_path(str(self.image_dir)))
         self.store = Store(self.image_dir, self.config_obj)
         self.entries = []
         self._img_cache.clear()
@@ -583,12 +743,13 @@ class App(tk.Tk):
         if failed:
             parts.append(f"{failed} 张打不开")
         if fix:
-            parts.append(f"{fix} 张建议修正（点【修正这张】）")
+            parts.append(f"{fix} 张待修正")
         self.status_label.configure(text=" · ".join(parts))
 
     def _refresh_home(self):
         total = len(self.entries)
         ok = sum(1 for e in self.entries if e.ok)
+        fix = sum(1 for e in self.entries if e.ok and e.needs_fix and not e.verified)
         if self._syncing:
             text = "正在处理图片，请稍候…"
         elif total == 0:
@@ -597,10 +758,20 @@ class App(tk.Tk):
             text = f"{total} 张图片都打不开，请检查文件是否损坏"
         else:
             text = f"已就绪：共 {ok} 张图片"
-            fix = sum(1 for e in self.entries if e.ok and e.needs_fix and not e.verified)
             if fix:
-                text += f" · {fix} 张建议修正（开始后可点【修正这张】）"
+                text += f" · {fix} 张待修正（开始后可点【修正这张】）"
+
+        if self._syncing:
+            dot = WARN
+        elif total and ok == 0:
+            dot = ERROR
+        elif ok:
+            dot = WARN if fix else ACCENT
+        else:
+            dot = FG_FAINT
+
         self.home_status.configure(text=text)
+        self.status_dot.itemconfigure(self._dot, fill=dot)
         self._can_start = ok > 0 and not self._syncing
         self.start_btn.configure(state="normal" if self._can_start else "disabled")
 
@@ -661,19 +832,19 @@ class _ProgressDialog(tk.Toplevel):
     def __init__(self, parent, total: int):
         super().__init__(parent)
         self.title("正在处理图片")
-        self.configure(bg=BG)
+        self.configure(bg=SURFACE)
         self.resizable(False, False)
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", lambda: None)  # 处理完成前不可关闭
 
-        tk.Label(self, text="正在生成剪影，请稍候…", bg=BG, fg=FG,
-                 font=(FONT, 13, "bold")).pack(padx=28, pady=(20, 8))
+        tk.Label(self, text="正在生成剪影，请稍候…", bg=SURFACE, fg=FG,
+                 font=(FONT, 13, "bold")).pack(padx=32, pady=(22, 10))
         self.bar = ttk.Progressbar(self, length=440, maximum=max(total, 1), value=0)
-        self.bar.pack(padx=28)
-        self.detail = tk.Label(self, text="", bg=BG, fg=FG_DIM, font=(FONT, 10))
-        self.detail.pack(padx=28, pady=(8, 2))
-        self.count = tk.Label(self, text=f"0 / {total}", bg=BG, fg=FG_DIM, font=(FONT, 10))
-        self.count.pack(pady=(0, 18))
+        self.bar.pack(padx=32)
+        self.detail = tk.Label(self, text="", bg=SURFACE, fg=FG_DIM, font=(FONT, 10))
+        self.detail.pack(padx=32, pady=(10, 2))
+        self.count = tk.Label(self, text=f"0 / {total}", bg=SURFACE, fg=FG_FAINT, font=(FONT, 10))
+        self.count.pack(pady=(0, 20))
         self.after(50, self._center)
         try:
             self.grab_set()

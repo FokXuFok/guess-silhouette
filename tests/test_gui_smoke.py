@@ -126,6 +126,12 @@ assert app.view == "home"
 
 app.destroy()
 print("SMOKE_OK")
+# 与真实程序退出方式一致(guess.py 同样用 os._exit 硬退):
+# 规避 Tk + onnxruntime 混合环境下偶发的解释器退出挂起
+import os as _os
+import sys as _sys
+_sys.stdout.flush()
+_os._exit(0)
 '''
 
 

@@ -16,11 +16,11 @@ from . import imaging
 
 log = logging.getLogger(__name__)
 
-BG = "#101014"
-PANEL_BG = "#17171C"
-FG = "#EAEAEA"
-FG_DIM = "#9A9AA5"
-ACCENT = "#4C8DFF"
+BG = "#0E0F14"
+PANEL_BG = "#15171E"
+FG = "#F2F3F7"
+FG_DIM = "#A7ABB8"
+ACCENT = "#5B8DFF"
 REMOVED_TINT = np.array([214, 76, 76], np.float32)  # 被去掉的背景：红色半透明
 FONT = "Microsoft YaHei UI"
 
@@ -89,7 +89,7 @@ class EditorDialog(tk.Toplevel):
     # ---------- 界面 ----------
 
     def _build_widgets(self):
-        self.canvas = tk.Canvas(self, bg="#08080A", highlightthickness=0, cursor="crosshair")
+        self.canvas = tk.Canvas(self, bg="#0A0B0F", highlightthickness=0, cursor="crosshair")
         self.canvas.pack(side="left", fill="both", expand=True)
 
         panel = tk.Frame(self, bg=PANEL_BG, width=290)
@@ -139,15 +139,15 @@ class EditorDialog(tk.Toplevel):
         row = tk.Frame(panel, bg=PANEL_BG)
         row.pack(fill="x", padx=16, pady=(16, 4))
         for text, cmd in (("撤销", self._undo_op), ("重做", self._redo_op)):
-            tk.Button(row, text=text, command=cmd, takefocus=0, bg="#24242C", fg=FG, relief="flat",
-                      activebackground="#32323C", activeforeground=FG, font=(FONT, 10), width=8).pack(
+            tk.Button(row, text=text, command=cmd, takefocus=0, bg="#1E212B", fg=FG, relief="flat",
+                      activebackground="#262A36", activeforeground=FG, font=(FONT, 10), width=8).pack(
                 side="left", padx=(0, 8))
 
         tk.Button(panel, text="保存并继续修正", command=self._save, takefocus=0, bg=ACCENT, fg="white",
-                  relief="flat", activebackground="#3B78E0", activeforeground="white",
+                  relief="flat", activebackground="#4478E0", activeforeground="white",
                   font=(FONT, 12, "bold"), pady=6).pack(fill="x", padx=16, pady=(14, 4))
-        tk.Button(panel, text="取消", command=self._cancel, takefocus=0, bg="#24242C", fg=FG,
-                  relief="flat", activebackground="#32323C", activeforeground=FG,
+        tk.Button(panel, text="取消", command=self._cancel, takefocus=0, bg="#1E212B", fg=FG,
+                  relief="flat", activebackground="#262A36", activeforeground=FG,
                   font=(FONT, 10)).pack(fill="x", padx=16, pady=(0, 14))
         tk.Label(panel, text="左键 = 当前工具\n右键 = 临时反向擦/恢复\nCtrl+Z 撤销 / Ctrl+Y 重做",
                  bg=PANEL_BG, fg=FG_DIM, font=(FONT, 9), justify="left").pack(anchor="w", padx=16, pady=(6, 0))

@@ -9,6 +9,7 @@
 """
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -124,7 +125,10 @@ def main(argv=None) -> int:
     _enable_dpi_awareness()
     from app.ui import App
     App(image_dir, config).run()
-    return 0
+    # 兜底硬退:Tk 与 onnxruntime 混合环境下,解释器正常退出偶发挂起(竞态)。
+    # 日志实时落盘、缓存在处理完成时写入,硬退不丢已完成的数据;
+    # 万一打断写入,缓存损坏自愈机制会在下次启动时自动重算。
+    os._exit(0)
 
 
 if __name__ == "__main__":
