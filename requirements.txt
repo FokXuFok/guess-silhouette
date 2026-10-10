@@ -3,5 +3,9 @@ opencv-python>=4.8
 Pillow>=10.0
 numpy>=1.24
 
+# AI 抠图（可选：不装或缺少模型时自动降级为传统抠图）
+# 模型文件 models/isnetis.onnx 需单独放入程序目录（获取方式见 README 第 7 节）
+onnxruntime>=1.20
+
 # 开发/测试依赖（可选）
 pytest>=7.0

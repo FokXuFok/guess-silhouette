@@ -25,6 +25,7 @@ REMOVED_TINT = np.array([214, 76, 76], np.float32)  # 被去掉的背景：红�
 FONT = "Microsoft YaHei UI"
 
 TIER_LABEL = {
+    imaging.TIER_AI: "AI 智能抠图(isnet)",
     imaging.TIER_ALPHA: "透明背景（alpha）",
     imaging.TIER_SOLID: "纯色背景",
     imaging.TIER_GRADIENT: "渐变背景",

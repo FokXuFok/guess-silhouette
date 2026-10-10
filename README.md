@@ -166,13 +166,23 @@
 6. **支持格式**
    - PNG、JPG、JPEG、WEBP、BMP
 
+7. **分辨率别太低**
+   - 建议短边 ≥ 600px；缩略图级别的图（如 350px 左右）抠图质量会明显下降，建议换更清晰的素材。
+
 ---
 
 ## 7. 本地抠图方案
 
-完全本地，不用 AI，不联网、不上传。
+完全本地，不联网、不上传。优先使用内置 AI 模型（离线运行），模型缺失时自动降级为传统算法。
 
 ### 7.1 按背景分档处理
+
+#### 第 0 档：AI 智能抠图（isnet，推荐）
+
+- 程序目录存在 `models/isnetis.onnx` 时优先使用，对动漫立绘/截图效果最好。
+- 完全离线、本地推理，一张约 1~2 秒；只在添加/处理图片时运行一次，游戏现场不受影响。
+- 处理结果不合理（覆盖率异常等）时自动降级到下面的传统分档，全流程不受影响。
+- 不想用 AI：config.json 里设 `"ai_matting": false`；模型获取方式见 16.4。
 
 #### 第 1 档：透明背景 PNG
 
@@ -503,6 +513,14 @@ build.bat        # 单文件：dist\猜剪影.exe（首次启动稍慢，会解�
 build.bat dir    # 文件夹模式：dist\猜剪影\（启动更快，推荐活动现场用）
 ```
 
+AI 模型说明：
+
+- 模型文件 `models/isnetis.onnx`（约 176MB）不在仓库里，从 HuggingFace 镜像获取：
+  `https://hf-mirror.com/skytnt/anime-seg/resolve/main/isnetis.onnx`
+  下载后放进仓库 `models/` 目录（或直接放到 exe 旁的 `models/` 目录）。
+- 打包脚本会自动把模型复制到 dist 输出目录；模型不存在时生成不含 AI 的版本（传统四档照常工作）。
+- 单文件模式下模型同样放 exe 旁边的 `models/` 子目录（不打进 exe，避免启动解压变慢）。
+
 ### 16.5 缓存与日志
 
 - 图片文件夹：默认程序目录下 `图片\`，文件名（去掉扩展名）就是答案。
@@ -523,6 +541,7 @@ build.bat dir    # 文件夹模式：dist\猜剪影\（启动更快，推荐活�
 | canvas_w / canvas_h | 1920 / 1080 | 统一画布尺寸（对齐投影分辨率） |
 | subject_ratio | 0.82 | 角色占画布高度比例（统一大小） |
 | guess_bg / silhouette_color | #FFFFFF / #000000 | 猜谜图背景与剪影颜色 |
+| ai_matting | true | AI 抠图优先（需 models/isnetis.onnx；缺失时自动降级） |
 
 ### 16.7 代码结构
 
@@ -534,6 +553,7 @@ app/
   ui.py             主界面：主页面、游戏页、展示完毕页、快捷键、全屏
   editor.py         手动修正编辑器：矩形框选 / 擦除 / 恢复 / 撤销 / 容差 / 羽化
   imaging.py        抠图核心：分档处理 + 剪影、揭晓图生成
+  segmentation.py   AI 抠图（isnet ONNX 本地推理，可选自动降级）
   library.py        添加图片：多选复制进库、重名与重复内容处理
   store.py          缓存与状态管理（state.json）
   deck.py           随机抽题（一轮不重复 / 展示完即止）

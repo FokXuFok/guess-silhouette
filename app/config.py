@@ -17,6 +17,7 @@ class Config:
     subject_ratio: float = 0.82    # 角色占画布高度比例
     guess_bg: str = "#FFFFFF"      # 猜谜图背景
     silhouette_color: str = "#000000"  # 剪影颜色
+    ai_matting: bool = True        # AI 抠图优先(模型缺失/onnxruntime 未装时自动降级)
 
     @staticmethod
     def default_path() -> Path:

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import imaging
+from . import imaging, segmentation
 from .config import Config
 from .paths import cache_dir_for
 
@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 STATE_VERSION = 1
-ALGO_VERSION = 2  # 抠图算法版本：升级后旧缓存整体重算，避免一直用旧效果
+ALGO_VERSION = 3  # 抠图算法版本：升级后旧缓存整体重算，避免一直用旧效果
 
 
 @dataclass
@@ -56,6 +56,8 @@ class Store:
         self.config = config
         self.cache_dir = cache_dir_for(self.image_dir)
         self.state_path = self.cache_dir / "state.json"
+        # AI 分割器(模型缺失/未装 onnxruntime 时为 None,全流程走传统抠图)
+        self.segmenter = segmentation.create_segmenter(config)
 
     # ---------- 扫描与状态文件 ----------
 
@@ -160,7 +162,7 @@ class Store:
         st = path.stat()
         rgba = imaging.load_image(path)
         work = imaging.downscale(rgba)
-        res = imaging.auto_mask(work, self.config.tolerance)
+        res = imaging.auto_mask(work, self.config.tolerance, segmenter=self.segmenter)
 
         cfg = self.config
         guess = imaging.render_guess(work, res.mask, cfg)

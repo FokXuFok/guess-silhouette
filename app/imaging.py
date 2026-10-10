@@ -1,6 +1,6 @@
-"""图像处理核心：分档抠图（透明/纯色/渐变/GrabCut）+ 剪影、揭晓图生成。
+"""图像处理核心:分档抠图(AI/透明/纯色/渐变/GrabCut)+ 剪影、揭晓图生成。
 
-完全本地运行，不使用 AI / 网络。
+完全本地运行,不使用联网 AI;AI 档使用本地 ONNX 模型(可选,缺失时自动降级)。
 """
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,10 +11,11 @@ from PIL import Image, ImageColor, ImageOps
 
 from .config import Config
 
-TIER_ALPHA = 1     # 透明背景 PNG：直接读 alpha
-TIER_SOLID = 2     # 纯色背景：边缘估计 + Lab 色距 + 只去边缘连通背景
-TIER_GRADIENT = 3  # 渐变背景：边缘拟合背景模型后逐像素比较
-TIER_COMPLEX = 4   # 复杂背景：GrabCut
+TIER_AI = 0        # AI 模型(isnet):可用时优先,失败静默降级到下面四档
+TIER_ALPHA = 1     # 透明背景 PNG:直接读 alpha
+TIER_SOLID = 2     # 纯色背景:边缘估计 + Lab 色距 + 只去边缘连通背景
+TIER_GRADIENT = 3  # 渐变背景:边缘拟合背景模型后逐像素比较
+TIER_COMPLEX = 4   # 复杂背景:GrabCut
 
 WORK_MAX_DIM = 2400          # 处理时最长边上限（保证渲染分辨率 ≥ 1080p）
 GRABCUT_MAX_DIM = 512        # 跑 GrabCut 的最长边上限（耗时随分辨率急剧上升）
@@ -22,6 +23,9 @@ SOLID_RESIDUAL_TOL = 5.0     # 纯色判定：边界颜色中位残差（Lab ΔE
 GRADIENT_RESIDUAL_TOL = 8.0  # 渐变判定：拟合后残差阈值
 MIN_ALPHA_FRACTION = 0.01    # alpha 图判定为"透明背景"的最小透明像素占比
 DARK_SUBJECT_L = 55.0        # 主体亮度低于该值视为深色，揭晓时加描边
+AI_THRESHOLD = 0.4           # AI 蒙版二值化阈值（实测优于 0.5:浅色区域不被切碎）
+AI_MIN_COVER = 0.03          # AI 结果覆盖率低于此值视为失败,回落传统路径
+AI_MAX_COVER = 0.95          # 高于此值同样视为失败
 
 
 @dataclass
@@ -55,9 +59,15 @@ def downscale(rgba: np.ndarray, max_dim: int = WORK_MAX_DIM) -> np.ndarray:
 
 # ---------------- 分档抠图 ----------------
 
-def auto_mask(rgba: np.ndarray, tolerance: float = 20.0) -> MattingResult:
-    """自动抠图：按背景复杂度分档处理，返回蒙版与质量信息。"""
+def auto_mask(rgba: np.ndarray, tolerance: float = 20.0, segmenter=None) -> MattingResult:
+    """自动抠图：AI 可用时优先(第 0 档)，失败静默回落按背景复杂度分档处理。"""
     rgba = np.asarray(rgba)
+
+    # 第 0 档：AI 模型(isnet)——可用且结果合理时直接采用
+    if segmenter is not None and getattr(segmenter, "is_ready", False):
+        ai_result = _ai_mask(rgba, segmenter)
+        if ai_result is not None:
+            return ai_result
 
     # 第 1 档：透明背景 PNG，alpha 即蒙版
     if rgba.ndim == 3 and rgba.shape[2] == 4:
@@ -102,6 +112,30 @@ def auto_mask(rgba: np.ndarray, tolerance: float = 20.0) -> MattingResult:
                                  reasons=["自动效果一般，已换 GrabCut 重试，建议检查"])
 
     return MattingResult(mask=mask_bool.astype(np.uint8) * 255, tier=tier,
+                         confidence=confidence, needs_fix=needs_fix, reasons=reasons)
+
+
+def _ai_mask(rgba: np.ndarray, segmenter) -> MattingResult | None:
+    """AI 档:调用本地分割模型生成蒙版;结果不合理时返回 None(调用方回落)。"""
+    rgb = np.asarray(rgba)[..., :3]
+    try:
+        soft = segmenter.predict(np.ascontiguousarray(rgb))
+    except Exception:  # noqa: BLE001 - AI 失败一律降级,不打断处理流程
+        return None
+    if soft is None:
+        return None
+    soft = np.asarray(soft)
+    if soft.shape[:2] != rgb.shape[:2]:
+        soft = cv2.resize(soft, (rgb.shape[1], rgb.shape[0]),
+                          interpolation=cv2.INTER_NEAREST)
+    hard = soft.astype(np.uint8) >= int(AI_THRESHOLD * 255 + 0.5)
+    mask_bool = cleanup_mask(hard, fill_hole_ratio=0.5)
+
+    cover = float(mask_bool.mean())
+    if cover < AI_MIN_COVER or cover > AI_MAX_COVER:
+        return None  # 覆盖率荒谬,视为失败
+    confidence, needs_fix, reasons = _quality(mask_bool, TIER_AI)
+    return MattingResult(mask=mask_bool.astype(np.uint8) * 255, tier=TIER_AI,
                          confidence=confidence, needs_fix=needs_fix, reasons=reasons)
 
 
@@ -308,13 +342,16 @@ def _mask_preferable(candidate: np.ndarray, current: np.ndarray) -> bool:
     return _border_ratio(candidate) <= _border_ratio(current)
 
 
+_BASE_CONF = {TIER_AI: 0.95, TIER_SOLID: 0.9, TIER_GRADIENT: 0.75}
+
+
 def _quality(mask_bool: np.ndarray, tier: int):
     """蒙版质量评估：置信度、是否需要人工修正、原因说明。"""
     area = float(mask_bool.mean())
     n_comp = cv2.connectedComponents(mask_bool.astype(np.uint8), connectivity=8)[0] - 1
     border_ratio = _border_ratio(mask_bool)
 
-    conf = 0.9 if tier == TIER_SOLID else 0.75
+    conf = _BASE_CONF.get(tier, 0.75)
     reasons: list[str] = []
     if area < 0.02:
         conf = min(conf, 0.15)

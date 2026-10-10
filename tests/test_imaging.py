@@ -218,3 +218,54 @@ def test_load_image_applies_exif_orientation(tmp_path):
     loaded = im.load_image(path)
     assert loaded.shape[:2] == (120, 60)  # 转正后应为竖图：高 120 × 宽 60
     assert loaded.shape[2] == 4
+
+
+# ---------- AI 第 0 档 ----------
+
+class _FakeSegmenter:
+    """模拟 Segmenter:返回固定蒙版(None 表示推理失败)。"""
+
+    def __init__(self, mask=None):
+        self._mask = mask
+        self.is_ready = True
+        self.calls = 0
+
+    def predict(self, rgb):
+        self.calls += 1
+        return self._mask
+
+
+def test_auto_mask_prefers_ai_when_available():
+    """AI 可用时优先使用,结果按 TIER_AI 返回,不再走传统分档。"""
+    rgb, gt = make_blob("noise")  # 传统路径这里是复杂背景 GrabCut
+    seg = _FakeSegmenter(mask=gt.astype(np.uint8) * 255)
+    res = im.auto_mask(rgb, segmenter=seg)
+    assert seg.calls == 1
+    assert res.tier == im.TIER_AI
+    assert res.mask.shape == rgb.shape[:2]
+    assert iou(res.mask > 0, gt) > 0.9
+    assert res.needs_fix is False
+
+
+def test_auto_mask_falls_back_when_ai_fails():
+    rgb, _ = make_blob("solid")
+    res = im.auto_mask(rgb, segmenter=_FakeSegmenter(None))
+    assert res.tier == im.TIER_SOLID  # 静默回落传统路径
+
+
+def test_auto_mask_falls_back_when_ai_coverage_absurd():
+    rgb, _ = make_blob("solid")
+    h, w = rgb.shape[:2]
+    seg = _FakeSegmenter(mask=np.full((h, w), 255, np.uint8))  # 整图都是主体 → 不合理
+    res = im.auto_mask(rgb, segmenter=seg)
+    assert res.tier != im.TIER_AI
+    assert res.tier == im.TIER_SOLID
+
+
+def test_auto_mask_skips_not_ready_segmenter():
+    rgb, _ = make_blob("solid")
+    seg = _FakeSegmenter(None)
+    seg.is_ready = False
+    res = im.auto_mask(rgb, segmenter=seg)
+    assert seg.calls == 0  # 未就绪不应被调用
+    assert res.tier == im.TIER_SOLID

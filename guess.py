@@ -44,6 +44,24 @@ def _enable_dpi_awareness() -> None:
             pass
 
 
+def _print_ai_status(store) -> None:
+    """CLI 报告 AI 抠图状态，方便活动前确认。"""
+    from app import segmentation
+
+    seg = getattr(store, "segmenter", None)
+    if seg is None:
+        if not getattr(store.config, "ai_matting", True):
+            print("AI 抠图：已在配置中关闭（config.json 的 ai_matting=false）")
+        elif not segmentation.default_model_path().is_file():
+            print("AI 抠图：未启用（未找到 models/isnetis.onnx，使用传统抠图）")
+        else:
+            print("AI 抠图：未启用（使用传统抠图）")
+    elif seg.is_ready:
+        print("AI 抠图：已启用（isnet 本地模型）")
+    else:
+        print("AI 抠图：模型加载失败，本次使用传统抠图（详见 缓存/运行日志.log）")
+
+
 def run_cli(image_dir: Path, config, force: bool) -> int:
     from app.store import Store
 
@@ -55,10 +73,12 @@ def run_cli(image_dir: Path, config, force: bool) -> int:
         return 1
 
     print(f"图片文件夹：{image_dir}")
+    _print_ai_status(store)
     print(f"共 {len(files)} 张图片，开始处理…")
     summary = store.sync(force=force, progress=lambda i, t, n: print(f"  [{i}/{t}] {n}"))
 
     tier_names = {
+        0: "AI 智能抠图",
         1: "透明背景",
         2: "纯色背景",
         3: "渐变背景",
