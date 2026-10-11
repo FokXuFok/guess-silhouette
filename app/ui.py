@@ -299,6 +299,10 @@ class App(tk.Tk):
         self.finish_btn = FancyButton(self, text="结束本轮 (Esc)",
                                       command=self._btn(self.end_round),
                                       font_size=10, pad_x=16, pad_y=7, parent_bg=BG)
+        # 修正这张：全屏游戏中悬浮在【结束本轮】左侧（窗口模式用底部按钮行，不重复显示）
+        self.fix_btn = FancyButton(self, text="修正这张",
+                                   command=self._btn(lambda: self._open_editor()),
+                                   font_size=10, pad_x=16, pad_y=7, parent_bg=BG)
 
     # ================= 展示完毕页 =================
 
@@ -363,6 +367,7 @@ class App(tk.Tk):
         self.bottom.pack_forget()
         self.image_label.pack_forget()
         self.finish_btn.place_forget()
+        self.fix_btn.place_forget()
 
         if self.view == HOME:
             self.home_frame.pack(side="top", fill="both", expand=True)
@@ -378,8 +383,11 @@ class App(tk.Tk):
         self.image_label.pack(side="top", fill="both", expand=True)
         if self.fullscreen:
             self.buttons.pack_forget()
+            # 全屏时右上角保留【修正这张】+【结束本轮】，随时能修正当前图
+            self.fix_btn.place(relx=1.0, rely=0.0, anchor="ne",
+                               x=-14 - self.finish_btn._bw - 10, y=12)
         else:
-            self.buttons.pack(side="top", pady=(0, 14))
+            self.buttons.pack(side="top", pady=(0, 14))  # 底部按钮行已含【修正这张】
         self.finish_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-14, y=12)
 
     def _apply_cursor(self):

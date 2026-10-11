@@ -42,9 +42,12 @@ class EditorDialog(tk.Toplevel):
         self.configure(bg=BG)
         self.transient(parent)
         try:
-            self.state("zoomed")  # Windows：编辑器直接最大化
+            self.attributes("-fullscreen", True)  # 修正窗口全屏（用户要求）
         except tk.TclError:
-            pass
+            try:
+                self.state("zoomed")
+            except tk.TclError:
+                pass
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
         self.store = store
@@ -64,6 +67,7 @@ class EditorDialog(tk.Toplevel):
         # 状态
         self.mode = tk.StringVar(value="erase")
         self.brush = tk.IntVar(value=48)
+        self.magic_tol = tk.IntVar(value=16)
         self.tol = tk.DoubleVar(value=float(store.config.tolerance))
         self.feather = tk.DoubleVar(value=float(store.config.feather_px))
         self.scale = 1.0
@@ -72,6 +76,7 @@ class EditorDialog(tk.Toplevel):
         self._last_pt = None
         self._rect_start = None
         self._rect_item = None
+        self._brush_cursor = None       # 笔刷大小预览圈
         self._undo: list = []
         self._redo: list = []
         self._tol_job = None
@@ -111,13 +116,19 @@ class EditorDialog(tk.Toplevel):
         tk.Label(panel, text="工具", bg=PANEL_BG, fg=FG, font=(FONT, 11, "bold")).pack(anchor="w", padx=16, pady=(14, 2))
         for text, val in (("矩形框选主体（重新抠图）", "rect"),
                           ("擦除背景（去掉角色）", "erase"),
-                          ("恢复角色（找回被误删部分）", "restore")):
+                          ("恢复角色（找回被误删部分）", "restore"),
+                          ("快速选择去除（点背景整片去掉）", "magic_erase"),
+                          ("快速选择恢复（点角色整片找回）", "magic_restore")):
             tk.Radiobutton(panel, text=text, variable=self.mode, value=val, bg=PANEL_BG,
                            fg=FG, selectcolor=BG, activebackground=PANEL_BG, activeforeground=FG,
                            font=(FONT, 10), anchor="w").pack(anchor="w", padx=10)
 
         tk.Label(panel, text="笔刷大小", bg=PANEL_BG, fg=FG, font=(FONT, 10)).pack(anchor="w", padx=16, pady=(12, 0))
         tk.Scale(panel, from_=8, to=200, orient="horizontal", variable=self.brush, bg=PANEL_BG,
+                 fg=FG, troughcolor=BG, highlightthickness=0, length=240).pack(padx=12)
+
+        tk.Label(panel, text="快速选择容差（越大选得越多）", bg=PANEL_BG, fg=FG, font=(FONT, 10)).pack(anchor="w", padx=16, pady=(8, 0))
+        tk.Scale(panel, from_=4, to=64, orient="horizontal", variable=self.magic_tol, bg=PANEL_BG,
                  fg=FG, troughcolor=BG, highlightthickness=0, length=240).pack(padx=12)
 
         tk.Label(panel, text="容差（重跑自动抠图）", bg=PANEL_BG, fg=FG, font=(FONT, 10)).pack(anchor="w", padx=16, pady=(8, 0))
@@ -149,7 +160,7 @@ class EditorDialog(tk.Toplevel):
         tk.Button(panel, text="取消", command=self._cancel, takefocus=0, bg="#1E212B", fg=FG,
                   relief="flat", activebackground="#262A36", activeforeground=FG,
                   font=(FONT, 10)).pack(fill="x", padx=16, pady=(0, 14))
-        tk.Label(panel, text="左键 = 当前工具\n右键 = 临时反向擦/恢复\nCtrl+Z 撤销 / Ctrl+Y 重做",
+        tk.Label(panel, text="左键 = 当前工具\n右键 = 临时反向擦/恢复\n快速选择:点一下整片生效\nCtrl+Z 撤销 / Ctrl+Y 重做",
                  bg=PANEL_BG, fg=FG_DIM, font=(FONT, 9), justify="left").pack(anchor="w", padx=16, pady=(6, 0))
 
     def _bind_events(self):
@@ -160,6 +171,8 @@ class EditorDialog(tk.Toplevel):
         c.bind("<Button-3>", lambda e: self._on_press(e, restore=True))
         c.bind("<B3-Motion>", lambda e: self._on_motion(e, restore=True))
         c.bind("<ButtonRelease-3>", self._on_release)
+        c.bind("<Motion>", self._on_hover, add="+")
+        c.bind("<Leave>", lambda e: self._hide_brush_cursor())
         c.bind("<Configure>", lambda e: setattr(self, "_dirty", True))
         self.bind("<Escape>", lambda e: self._cancel())
         self.bind("<Control-z>", lambda e: self._undo_op())
@@ -193,6 +206,7 @@ class EditorDialog(tk.Toplevel):
         self.offset = ((cw - tw) // 2, (ch - th) // 2)
         self.canvas.delete("all")
         self._rect_item = None
+        self._brush_cursor = None
         self.canvas.create_image(self.offset[0], self.offset[1], anchor="nw", image=self._photo)
 
     # ---------- 坐标与绘制 ----------
@@ -203,6 +217,13 @@ class EditorDialog(tk.Toplevel):
     def _on_press(self, event, restore: bool):
         if self._busy:
             return
+        if self.mode.get() in ("magic_erase", "magic_restore"):
+            self._last_pt = None  # 防止切模式后拖动误出笔刷线
+            self._push_undo()
+            self._magic_select(self._to_image_xy(event.x, event.y),
+                               erase=(self.mode.get() == "magic_erase"))
+            self._dirty = True
+            return
         if self.mode.get() == "rect":
             self._rect_start = (event.x, event.y)
             if self._rect_item:
@@ -212,9 +233,16 @@ class EditorDialog(tk.Toplevel):
             return
         self._push_undo()
         self._last_pt = self._to_image_xy(event.x, event.y)
-        val = 255 if restore else 0
-        self._stroke(self._last_pt, self._last_pt, val)
+        self._stroke(self._last_pt, self._last_pt, self._stroke_value(restore))
         self._dirty = True
+
+    def _stroke_value(self, right_button: bool) -> int:
+        """笔刷落笔值：擦除=0（去背景），恢复=255（找回角色）。
+
+        左键 = 当前工具；右键 = 临时反向。恢复模式下左键也必须写 255。
+        """
+        erase = (self.mode.get() == "erase") != bool(right_button)
+        return 0 if erase else 255
 
     def _on_motion(self, event, restore: bool):
         if self._busy:
@@ -226,9 +254,10 @@ class EditorDialog(tk.Toplevel):
         if self._last_pt is None:
             return
         pt = self._to_image_xy(event.x, event.y)
-        self._stroke(self._last_pt, pt, 255 if restore else 0)
+        self._stroke(self._last_pt, pt, self._stroke_value(restore))
         self._last_pt = pt
         self._dirty = True
+        self._update_brush_cursor(event.x, event.y)
 
     def _on_release(self, event):
         if self.mode.get() == "rect":
@@ -263,6 +292,67 @@ class EditorDialog(tk.Toplevel):
             cv2.circle(self.mask, a, r, val, -1)
         else:
             cv2.line(self.mask, a, b, val, thickness=max(1, r * 2))
+
+    def _magic_select(self, pt, erase: bool):
+        """快速选择(魔棒)：从点击点按颜色容差选取连通相似区域,整片设为去掉/恢复。
+
+        用 cv2.floodFill + FLOODFILL_FIXED_RANGE：容差是与种子点的绝对差,
+        而非相邻像素差——后者会沿渐变背景一路蔓延覆盖整图。
+        种子色取点击点 3×3 邻域均值(抗噪)。面积超 65% 拒绝操作(防误选整图)。
+        """
+        x, y = int(round(pt[0])), int(round(pt[1]))
+        if not (0 <= x < self.w and 0 <= y < self.h):
+            return
+        tol = max(1, int(self.magic_tol.get()))
+
+        # 取 3×3 邻域均值作为种子色(点击到噪点也能取到区域代表色)
+        x0, x1 = max(0, x - 1), min(self.w, x + 2)
+        y0, y1 = max(0, y - 1), min(self.h, y + 2)
+        seed = self.rgb[y0:y1, x0:x1].reshape(-1, 3).mean(axis=0).astype(np.uint8)
+
+        work = self.rgb.copy()
+        # 把点击点染成种子色(floodFill 从该点出发;邻域均值已代表性,用均值更稳)
+        work[y, x] = int(seed[0]), int(seed[1]), int(seed[2])
+        ff = np.zeros((self.h + 2, self.w + 2), np.uint8)
+        cv2.floodFill(work, ff, (x, y), 0,
+                      (tol, tol, tol), (tol, tol, tol),
+                      cv2.FLOODFILL_MASK_ONLY | cv2.FLOODFILL_FIXED_RANGE | (255 << 8) | 8)
+        region = ff[1:-1, 1:-1] > 0
+
+        # 面积上限保护：选中超过 65% 视为容差过大/整图同色,拒绝操作
+        cover = float(region.mean())
+        if cover > 0.65:
+            if self.hint.winfo_exists():
+                self.hint.configure(text="⚠ 选区过大({:.0%}),调小容差或换个点".format(cover),
+                                    fg="#E0A84C")
+            return
+
+        self.mask[region] = 0 if erase else 255
+        if self.hint.winfo_exists():
+            self.hint.configure(text="红色 = 被去掉的背景  ·  上次选区 {:.0%}".format(cover),
+                                fg=FG_DIM)
+
+    # ---------- 笔刷光标预览 ----------
+
+    def _on_hover(self, event):
+        if self._busy or self.mode.get() != "erase" and self.mode.get() != "restore":
+            self._hide_brush_cursor()
+            return
+        self._update_brush_cursor(event.x, event.y)
+
+    def _update_brush_cursor(self, cx, cy):
+        """在画布上画一个跟随鼠标的圆圈，提示实际笔刷覆盖范围（提升涂抹精准度）。"""
+        if self._brush_cursor:
+            self.canvas.delete(self._brush_cursor)
+        r = max(2.0, self.brush.get() / 2.0 * self.scale)
+        self._brush_cursor = self.canvas.create_oval(
+            cx - r, cy - r, cx + r, cy + r,
+            outline="#FFFFFF", dash=(3, 3))
+
+    def _hide_brush_cursor(self):
+        if self._brush_cursor:
+            self.canvas.delete(self._brush_cursor)
+            self._brush_cursor = None
 
     # ---------- 撤销 / 重做 ----------
 

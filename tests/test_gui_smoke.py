@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CHILD_SCRIPT = r'''
 import sys, time
 from pathlib import Path
+import numpy as np
 sys.path.insert(0, r"__ROOT__")
 
 from PIL import Image
@@ -100,13 +101,81 @@ assert needs, "复杂背景图应被标记建议修正"
 target = needs[0]
 dlg = EditorDialog(app, app.store, target, on_saved=app._on_editor_saved)
 pump(1.2)
-
+# 编辑器窗口必须全屏(用户要求)；tk 返回值可能是 int 1 或 str '1'
+assert str(dlg.attributes("-fullscreen")) == "1", "编辑器应全屏打开"
+# 画笔：擦一下再撤销、重做
 h, w = dlg.mask.shape[:2]
 dlg._push_undo()
 dlg._stroke((w // 2, h // 2), (w // 2 + 20, h // 2), 0)
 dlg._undo_op()
 dlg._redo_op()
 dlg._undo_op()
+
+# 回归:恢复模式左键必须写 255(曾与擦除等价,恢复功能形同虚设)
+from types import SimpleNamespace
+dlg.mask[:, :] = 0
+cx = dlg.offset[0] + int(w * dlg.scale / 2)
+cy = dlg.offset[1] + int(h * dlg.scale / 2)
+
+dlg.mode.set("restore")
+dlg._on_press(SimpleNamespace(x=cx, y=cy), restore=False)
+assert int(dlg.mask[h // 2, w // 2]) == 255, "恢复模式左键应恢复角色(255)"
+
+dlg.mode.set("erase")
+dlg._on_press(SimpleNamespace(x=cx, y=cy), restore=False)
+assert int(dlg.mask[h // 2, w // 2]) == 0, "擦除模式左键应去除背景(0)"
+
+dlg.mode.set("restore")
+dlg._on_press(SimpleNamespace(x=cx, y=cy), restore=True)
+assert int(dlg.mask[h // 2, w // 2]) == 0, "恢复模式右键应临时反向为擦除(0)"
+
+dlg.mode.set("erase")
+dlg._on_press(SimpleNamespace(x=cx, y=cy), restore=True)
+assert int(dlg.mask[h // 2, w // 2]) == 255, "擦除模式右键应临时反向为恢复(255)"
+
+# 快速选择(魔棒):点击按颜色容差选中连通区域,恢复模式整片设为角色/去除模式整片去掉
+lx = lambda fx: dlg.offset[0] + int(w * dlg.scale * fx)
+ly = lambda fy: dlg.offset[1] + int(h * dlg.scale * fy)
+dlg.rgb[:, : w // 2] = (200, 60, 90)   # 左半:角色色
+dlg.rgb[:, w // 2:] = (40, 90, 200)    # 右半:背景色
+
+dlg.mask[:, :] = 0
+dlg.mode.set("magic_restore")
+dlg._on_press(SimpleNamespace(x=lx(0.2), y=ly(0.5)), restore=False)
+assert int(dlg.mask[h // 2, int(w * 0.2)]) == 255, "魔棒恢复:点击的相似颜色区域应整片恢复(255)"
+assert int(dlg.mask[5, int(w * 0.45)]) == 255, "魔棒应选中远处连通同色区域(笔刷圆够不到)"
+assert int(dlg.mask[h // 2, int(w * 0.8)]) == 0, "魔棒不应影响另一侧不同颜色区域"
+dlg._undo_op()
+assert int(dlg.mask[h // 2, int(w * 0.2)]) == 0, "魔棒应可撤销"
+
+dlg.mask[:, :] = 255
+dlg.mode.set("magic_erase")
+dlg._on_press(SimpleNamespace(x=lx(0.2), y=ly(0.5)), restore=True)
+assert int(dlg.mask[5, int(w * 0.45)]) == 0, "魔棒去除:远处连通同色区域应整片去掉(0)"
+assert int(dlg.mask[h // 2, int(w * 0.8)]) == 255, "魔棒去除不应影响另一侧不同颜色区域"
+
+# 渐变背景:容差逐像素传播会让 floodFill 沿渐变蔓延覆盖整片;
+# 加 FLOODFILL_FIXED_RANGE 后,容差与种子点比较,不应蔓延到颜色明显不同的区域
+dlg.mask[:, :] = 255
+grad = np.zeros((h, w, 3), np.uint8)
+ramp = np.linspace(0, 255, w, dtype=np.uint8)   # 左黑渐变到右白
+grad[:] = ramp[:, None]
+dlg.rgb[:] = grad                               # 整图左黑→右白渐变
+dlg.mode.set("magic_erase")
+dlg.magic_tol.set(20)                           # 容差 20:左端 (0,0,0), 右端差距远超 20
+dlg._on_press(SimpleNamespace(x=lx(0.1), y=ly(0.5)), restore=False)
+left_hit = int((dlg.mask[:, : w // 4] == 0).sum())
+right_hit = int((dlg.mask[:, 3 * w // 4:] == 0).sum())
+assert right_hit == 0, "FIXED_RANGE 下,渐变右端颜色与种子差距远超容差,不应被选中"
+assert left_hit > 0, "渐变左端颜色与种子接近,应被选中"
+
+# 极大容差 + 整图近似同色:面积上限保护,应拒绝操作而非全图生效
+dlg.rgb[:] = (128, 128, 128)                    # 全图灰,任何点都是同色
+dlg.mask[:, :] = 255
+dlg.magic_tol.set(64)                           # 全图同色 → floodFill 会选满 100%
+dlg._on_press(SimpleNamespace(x=lx(0.5), y=ly(0.5)), restore=False)
+cover = float((dlg.mask == 0).mean())
+assert cover < 0.7, f"面积上限保护:全图近似同色时应拒绝(防止整图被误操作),实际覆盖 {cover:.0%}"
 
 dlg._push_undo()
 dlg.mask[:] = 0
@@ -121,8 +190,13 @@ assert (app.store.cache_dir / target.guess_file).exists()
 # ESC：从游戏返回主页面
 app.start_game()
 assert app.view == "game"
+app.update()
+# 全屏游戏中右上角必须有【修正这张】悬浮按钮(否则开始后没法修正剪影)
+assert app.fix_btn.place_info(), "全屏游戏中应显示【修正这张】"
 app._on_escape()
 assert app.view == "home"
+app.update()
+assert not app.fix_btn.place_info(), "非游戏视图不应显示悬浮【修正这张】"
 
 app.destroy()
 print("SMOKE_OK")
