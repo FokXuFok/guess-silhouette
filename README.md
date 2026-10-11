@@ -512,7 +512,11 @@ python -m pytest tests -q
 
 覆盖：分档抠图质量（合成图对拍真实蒙版）、缓存增量与损坏自愈、坏图跳过、随机抽题（不重复 / 展示完即止）、图片入库（重名、重复内容）、配置读写、界面冒烟（主页面 → 添加图片 → 开始 → 空格循环 → 完毕页 → 手动修正）。
 
-### 16.4 打包 exe
+### 16.4 下载与打包 exe
+
+**直接下载**：到 [Releases](https://github.com/FokXuFok/guess-silhouette/releases) 页面下载现成的 zip（文件夹版 / 单文件版，均已内置 AI 模型），解压双击 `猜剪影.exe` 即用。
+
+**自行打包**（需要 Python 环境）：
 
 ```bash
 build.bat        # 单文件：dist\猜剪影.exe（首次启动稍慢，会解压依赖）
@@ -521,9 +525,10 @@ build.bat dir    # 文件夹模式：dist\猜剪影\（启动更快，推荐活�
 
 AI 模型说明：
 
-- 模型文件 `models/isnetis.onnx`（约 176MB）不在仓库里，从 HuggingFace 镜像获取：
+- 模型文件 `models/isnetis.onnx`（约 168MB）**已通过 Git LFS 随仓库分发**，克隆仓库即可获得（需安装 [Git LFS](https://git-lfs.com/)）。
+- 也可从 HuggingFace 镜像单独下载：
   `https://hf-mirror.com/skytnt/anime-seg/resolve/main/isnetis.onnx`
-  下载后放进仓库 `models/` 目录（或直接放到 exe 旁的 `models/` 目录）。
+  放进仓库 `models/` 目录（或直接放到 exe 旁的 `models/` 目录）。
 - 打包脚本会自动把模型复制到 dist 输出目录；模型不存在时生成不含 AI 的版本（传统四档照常工作）。
 - 单文件模式下模型同样放 exe 旁边的 `models/` 子目录（不打进 exe，避免启动解压变慢）。
 
