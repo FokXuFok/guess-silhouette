@@ -9,3 +9,4 @@ config.json
 缓存/
 .workbuddy/
 _release/
+*.lnk
