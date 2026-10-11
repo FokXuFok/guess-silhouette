@@ -155,7 +155,7 @@ assert int(dlg.mask[5, int(w * 0.45)]) == 0, "魔棒去除:远处连通同色区
 assert int(dlg.mask[h // 2, int(w * 0.8)]) == 255, "魔棒去除不应影响另一侧不同颜色区域"
 
 # 渐变背景:容差逐像素传播会让 floodFill 沿渐变蔓延覆盖整片;
-# 加 FLOODFILL_FIXED_RANGE 后,容差与种子点比较,不应蔓延到颜色明显不同的区域
+# FIXED_RANGE + 颜色模型分类后,只应选中与种子颜色分布相近的左端
 dlg.mask[:, :] = 255
 grad = np.zeros((h, w, 3), np.uint8)
 ramp = np.linspace(0, 255, w, dtype=np.uint8)   # 左黑渐变到右白
@@ -166,8 +166,30 @@ dlg.magic_tol.set(20)                           # 容差 20:左端 (0,0,0), 右�
 dlg._on_press(SimpleNamespace(x=lx(0.1), y=ly(0.5)), restore=False)
 left_hit = int((dlg.mask[:, : w // 4] == 0).sum())
 right_hit = int((dlg.mask[:, 3 * w // 4:] == 0).sum())
-assert right_hit == 0, "FIXED_RANGE 下,渐变右端颜色与种子差距远超容差,不应被选中"
+assert right_hit == 0, "渐变右端颜色与种子分布差异大,不应被选中"
 assert left_hit > 0, "渐变左端颜色与种子接近,应被选中"
+
+# 相近色区分(PS 快速选择核心能力):残留块与角色块颜色都接近灰色背景,
+# 点击残留块应精确选中残留,不吞颜色相近的角色块
+dlg.rgb[:] = (128, 128, 128)                    # 背景:灰
+dlg.rgb[h // 4: 3 * h // 4, w // 4: w // 2] = (140, 130, 120)   # 角色块(左)
+dlg.rgb[h // 4: 3 * h // 4, w // 2 + 20: 3 * w // 4] = (160, 150, 130)  # 残留块(右,颜色接近角色)
+dlg.mask[:, :] = 255
+dlg.magic_tol.set(16)
+dlg.mode.set("magic_erase")
+dlg._on_press(SimpleNamespace(x=lx(0.63), y=ly(0.5)), restore=False)
+residual_center = int(dlg.mask[h // 2, w // 2 + 20 + 10])
+subject_center = int(dlg.mask[h // 2, w // 4 + 10])
+bg_center = int(dlg.mask[2, 2])
+assert residual_center == 0, "应精确去除点击的残留块"
+assert subject_center == 255, "颜色相近的角色块不应被吞掉"
+assert bg_center == 255, "背景灰不应被顺带去除"
+
+# 点击已是目标态的区域:无操作(去除模式点在纯背景上,mask 已是 0)
+dlg.mask[:, :] = 0
+before = dlg.mask.copy()
+dlg._on_press(SimpleNamespace(x=lx(0.95), y=ly(0.95)), restore=False)
+assert int((dlg.mask != before).sum()) == 0, "去除模式点在已是背景的区域应无操作"
 
 # 极大容差 + 整图近似同色:面积上限保护,应拒绝操作而非全图生效
 dlg.rgb[:] = (128, 128, 128)                    # 全图灰,任何点都是同色

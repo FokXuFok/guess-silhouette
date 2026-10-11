@@ -294,43 +294,77 @@ class EditorDialog(tk.Toplevel):
             cv2.line(self.mask, a, b, val, thickness=max(1, r * 2))
 
     def _magic_select(self, pt, erase: bool):
-        """快速选择(魔棒)：从点击点按颜色容差选取连通相似区域,整片设为去掉/恢复。
+        """快速选择:PS 快速选择工具同款思路(颜色模型分类 + 连通限定)。
 
-        用 cv2.floodFill + FLOODFILL_FIXED_RANGE：容差是与种子点的绝对差,
-        而非相邻像素差——后者会沿渐变背景一路蔓延覆盖整图。
-        种子色取点击点 3×3 邻域均值(抗噪)。面积超 65% 拒绝操作(防误选整图)。
+        参考 Paint Selection (SIGGRAPH 2009) / Adobe US8121407 的简化版:
+        1. 作用域限定:去除只能改当前前景、恢复只能改当前背景——点击处已是
+           目标态则提示并返回,天然杜绝"全图被改"。
+        2. floodFill(FIXED_RANGE, 容差减半)取种子区域——与种子颜色相近的
+           严格核心(不沿渐变蔓延)。
+        3. 双直方图贝叶斯分类:种子区域 vs 其余像素的颜色分布(BGR 各 16 级),
+           逐像素 log 似然比打分,>0 判为目标色;高斯模糊平滑边界。
+           —— 物体内部的渐变、阴影也能被吃全,而颜色不同的邻近区域不会被吞。
+        4. 只保留与点击点 8 连通的部分。
+        5. 面积 >65% 拒绝(兜底防整图误操作)。
         """
         x, y = int(round(pt[0])), int(round(pt[1]))
         if not (0 <= x < self.w and 0 <= y < self.h):
             return
         tol = max(1, int(self.magic_tol.get()))
 
-        # 取 3×3 邻域均值作为种子色(点击到噪点也能取到区域代表色)
+        # 1. 作用域限定
+        scope = self.mask > 128 if erase else self.mask <= 128
+        if not scope[y, x]:
+            self._hint_msg("这里已经是" + ("背景" if erase else "角色") + ",无需操作")
+            return
+
+        # 2. 种子区域
         x0, x1 = max(0, x - 1), min(self.w, x + 2)
         y0, y1 = max(0, y - 1), min(self.h, y + 2)
         seed = self.rgb[y0:y1, x0:x1].reshape(-1, 3).mean(axis=0).astype(np.uint8)
-
         work = self.rgb.copy()
-        # 把点击点染成种子色(floodFill 从该点出发;邻域均值已代表性,用均值更稳)
         work[y, x] = int(seed[0]), int(seed[1]), int(seed[2])
+        tol_eff = max(4, tol // 2)
         ff = np.zeros((self.h + 2, self.w + 2), np.uint8)
-        cv2.floodFill(work, ff, (x, y), 0,
-                      (tol, tol, tol), (tol, tol, tol),
+        cv2.floodFill(work, ff, (x, y), 0, (tol_eff,) * 3, (tol_eff,) * 3,
                       cv2.FLOODFILL_MASK_ONLY | cv2.FLOODFILL_FIXED_RANGE | (255 << 8) | 8)
-        region = ff[1:-1, 1:-1] > 0
+        raw = (ff[1:-1, 1:-1] > 0) & scope
+        if not raw.any():
+            self._hint_msg("容差太小没选中东西,调大试试", warn=True)
+            return
 
-        # 面积上限保护：选中超过 65% 视为容差过大/整图同色,拒绝操作
+        # 3. 双直方图贝叶斯分类
+        quant = self.rgb.astype(np.int32) >> 4                    # BGR 各 16 级
+        idx = (quant[..., 0] << 8) | (quant[..., 1] << 4) | quant[..., 2]
+        flat = idx.ravel()
+        n_bins = 4096
+        eps = 0.5
+        obj_h = np.bincount(flat[raw.ravel()], minlength=n_bins).astype(np.float64)
+        ref_h = np.bincount(flat[(~raw).ravel()], minlength=n_bins).astype(np.float64)
+        obj_p = (obj_h + eps) / (obj_h.sum() + eps * n_bins)
+        ref_p = (ref_h + eps) / (ref_h.sum() + eps * n_bins)
+        score = (np.log(obj_p)[flat] - np.log(ref_p)[flat]).reshape(self.h, self.w)
+        score = cv2.GaussianBlur(score.astype(np.float32), (5, 5), 1.5)
+        cand = (score > 0) & scope
+        cand |= raw                                               # 点击处必须在结果里
+
+        # 4. 连通限定:只保留含点击点的连通域
+        n, labels = cv2.connectedComponents(cand.astype(np.uint8), connectivity=8)
+        lid = int(labels[y, x])
+        region = labels == lid if lid > 0 else raw
+
+        # 5. 面积上限
         cover = float(region.mean())
         if cover > 0.65:
-            if self.hint.winfo_exists():
-                self.hint.configure(text="⚠ 选区过大({:.0%}),调小容差或换个点".format(cover),
-                                    fg="#E0A84C")
+            self._hint_msg(f"⚠ 选区过大({cover:.0%}),调小容差或换个点", warn=True)
             return
 
         self.mask[region] = 0 if erase else 255
+        self._hint_msg(f"红色 = 被去掉的背景  ·  上次选区 {cover:.0%}")
+
+    def _hint_msg(self, text: str, warn: bool = False):
         if self.hint.winfo_exists():
-            self.hint.configure(text="红色 = 被去掉的背景  ·  上次选区 {:.0%}".format(cover),
-                                fg=FG_DIM)
+            self.hint.configure(text=text, fg="#E0A84C" if warn else FG_DIM)
 
     # ---------- 笔刷光标预览 ----------
 
