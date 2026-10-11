@@ -7,5 +7,5 @@ dist/
 config.json
 图片/
 缓存/
-models/
 .workbuddy/
+_release/
