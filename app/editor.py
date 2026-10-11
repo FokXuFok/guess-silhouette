@@ -72,6 +72,7 @@ class EditorDialog(tk.Toplevel):
         self.feather = tk.DoubleVar(value=float(store.config.feather_px))
         self.scale = 1.0
         self.offset = (0, 0)
+        self._user_view = False         # False=自动适应窗口;True=用户手动缩放/平移过
         self._photo = None
         self._last_pt = None
         self._rect_start = None
@@ -153,6 +154,9 @@ class EditorDialog(tk.Toplevel):
             tk.Button(row, text=text, command=cmd, takefocus=0, bg="#1E212B", fg=FG, relief="flat",
                       activebackground="#262A36", activeforeground=FG, font=(FONT, 10), width=8).pack(
                 side="left", padx=(0, 8))
+        tk.Button(row, text="适应窗口", command=self._reset_view, takefocus=0, bg="#1E212B", fg=FG,
+                  relief="flat", activebackground="#262A36", activeforeground=FG,
+                  font=(FONT, 10), width=8).pack(side="left")
 
         tk.Button(panel, text="保存并继续修正", command=self._save, takefocus=0, bg=ACCENT, fg="white",
                   relief="flat", activebackground="#4478E0", activeforeground="white",
@@ -160,7 +164,7 @@ class EditorDialog(tk.Toplevel):
         tk.Button(panel, text="取消", command=self._cancel, takefocus=0, bg="#1E212B", fg=FG,
                   relief="flat", activebackground="#262A36", activeforeground=FG,
                   font=(FONT, 10)).pack(fill="x", padx=16, pady=(0, 14))
-        tk.Label(panel, text="左键 = 当前工具\n右键 = 临时反向擦/恢复\n快速选择:点一下整片生效\nCtrl+Z 撤销 / Ctrl+Y 重做",
+        tk.Label(panel, text="左键 = 当前工具\n右键 = 临时反向擦/恢复\n快速选择:点一下整片生效\n滚轮缩放 · 中键拖动平移 · Ctrl+0 复位\nCtrl+Z 撤销 / Ctrl+Y 重做",
                  bg=PANEL_BG, fg=FG_DIM, font=(FONT, 9), justify="left").pack(anchor="w", padx=16, pady=(6, 0))
 
     def _bind_events(self):
@@ -174,9 +178,15 @@ class EditorDialog(tk.Toplevel):
         c.bind("<Motion>", self._on_hover, add="+")
         c.bind("<Leave>", lambda e: self._hide_brush_cursor())
         c.bind("<Configure>", lambda e: setattr(self, "_dirty", True))
+        # 视图:滚轮缩放(以鼠标为锚),中键拖动平移
+        c.bind("<MouseWheel>", self._on_wheel)
+        c.bind("<Control-MouseWheel>", self._on_wheel)
+        c.bind("<Button-2>", self._on_pan_start)
+        c.bind("<B2-Motion>", self._on_pan_move)
         self.bind("<Escape>", lambda e: self._cancel())
         self.bind("<Control-z>", lambda e: self._undo_op())
         self.bind("<Control-y>", lambda e: self._redo_op())
+        self.bind("<Control-0>", lambda e: self._reset_view())
 
     # ---------- 渲染 ----------
 
@@ -198,16 +208,73 @@ class EditorDialog(tk.Toplevel):
     def _redraw(self):
         cw = max(100, self.canvas.winfo_width())
         ch = max(100, self.canvas.winfo_height())
-        scale = min(cw / self.w, ch / self.h)
-        self.scale = max(scale, 1e-6)
-        tw, th = max(1, int(self.w * self.scale)), max(1, int(self.h * self.scale))
-        img = self._make_overlay().resize((tw, th), Image.BILINEAR)
-        self._photo = ImageTk.PhotoImage(img)
-        self.offset = ((cw - tw) // 2, (ch - th) // 2)
+        if not self._user_view:
+            # 自动模式:整图适应窗口并居中
+            self.scale = max(min(cw / self.w, ch / self.h), 1e-6)
+            tw, th = max(1, int(self.w * self.scale)), max(1, int(self.h * self.scale))
+            self.offset = ((cw - tw) // 2, (ch - th) // 2)
+
         self.canvas.delete("all")
         self._rect_item = None
         self._brush_cursor = None
-        self.canvas.create_image(self.offset[0], self.offset[1], anchor="nw", image=self._photo)
+
+        # 只渲染可视区域:先全图合成 overlay,裁出可视块再缩放(放大后依然流畅)
+        overlay = self._make_overlay()
+        vx0 = max(0.0, -self.offset[0] / self.scale)
+        vy0 = max(0.0, -self.offset[1] / self.scale)
+        vx1 = min(float(self.w), vx0 + cw / self.scale)
+        vy1 = min(float(self.h), vy0 + ch / self.scale)
+        if vx1 <= vx0 or vy1 <= vy0:
+            self._draw_zoom_label(cw, ch)
+            return
+        crop = overlay.crop((int(vx0), int(vy0), int(np.ceil(vx1)), int(np.ceil(vy1))))
+        dw = max(1, int(round(crop.width * self.scale)))
+        dh = max(1, int(round(crop.height * self.scale)))
+        resample = Image.NEAREST if self.scale >= 1 else Image.BILINEAR  # 放大像素风,修正看得清
+        disp = crop.resize((dw, dh), resample)
+        self._photo = ImageTk.PhotoImage(disp)
+        px = self.offset[0] + int(vx0 * self.scale)
+        py = self.offset[1] + int(vy0 * self.scale)
+        self.canvas.create_image(px, py, anchor="nw", image=self._photo)
+        self._draw_zoom_label(cw, ch)
+
+    def _draw_zoom_label(self, cw: int, ch: int):
+        self.canvas.create_text(cw - 12, ch - 10, anchor="se",
+                                text=f"{self.scale * 100:.0f}%",
+                                fill="#9AA0B4", font=(FONT, 10, "bold"))
+
+    # ---------- 视图缩放 / 平移 ----------
+
+    def _zoom(self, factor: float, cx: int, cy: int):
+        """缩放:保持画布点 (cx,cy) 下的图像位置不动(以鼠标为锚)。"""
+        new_scale = min(max(self.scale * factor, 0.1), 8.0)
+        if abs(new_scale - self.scale) < 1e-9:
+            return
+        ix = (cx - self.offset[0]) / self.scale
+        iy = (cy - self.offset[1]) / self.scale
+        self.scale = new_scale
+        self.offset = (int(cx - ix * new_scale), int(cy - iy * new_scale))
+        self._user_view = True
+        self._dirty = True
+
+    def _on_wheel(self, event):
+        factor = 1.15 if event.delta > 0 else 1 / 1.15
+        self._zoom(factor, event.x, event.y)
+
+    def _on_pan_start(self, event):
+        self._pan_from = (event.x, event.y, self.offset)
+
+    def _on_pan_move(self, event):
+        if not getattr(self, "_pan_from", None):
+            return
+        sx, sy, off = self._pan_from
+        self.offset = (off[0] + event.x - sx, off[1] + event.y - sy)
+        self._user_view = True
+        self._dirty = True
+
+    def _reset_view(self):
+        self._user_view = False
+        self._dirty = True
 
     # ---------- 坐标与绘制 ----------
 

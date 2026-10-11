@@ -199,6 +199,28 @@ dlg._on_press(SimpleNamespace(x=lx(0.5), y=ly(0.5)), restore=False)
 cover = float((dlg.mask == 0).mean())
 assert cover < 0.7, f"面积上限保护:全图近似同色时应拒绝(防止整图被误操作),实际覆盖 {cover:.0%}"
 
+# 视图缩放:滚轮缩放以鼠标为锚(锚点下图像坐标不变),复位回适应窗口
+dlg._reset_view()
+pump(0.2)
+fit_scale = dlg.scale
+wx, wy = dlg.offset[0] + int(w * dlg.scale * 0.3), dlg.offset[1] + int(h * dlg.scale * 0.4)
+before_img = dlg._to_image_xy(wx, wy)
+dlg._zoom(2.0, wx, wy)
+pump(0.2)
+assert abs(dlg.scale - fit_scale * 2) < 1e-6, "放大 2 倍应生效"
+after_img = dlg._to_image_xy(wx, wy)
+assert abs(after_img[0] - before_img[0]) < 0.5 and abs(after_img[1] - before_img[1]) < 0.5, \
+    "缩放锚点下的图像坐标应保持不动"
+assert dlg._user_view is True
+# 放大视图下画笔/魔棒坐标换算仍正确
+dlg.mode.set("erase")
+dlg._on_press(SimpleNamespace(x=wx, y=wy), restore=False)
+ix, iy = int(before_img[0]), int(before_img[1])
+assert dlg.mask[iy, ix] == 0, "放大视图下画笔应落在正确的图像位置"
+dlg._reset_view()
+pump(0.2)
+assert abs(dlg.scale - fit_scale) < 1e-6 and dlg._user_view is False, "复位应回到适应窗口"
+
 dlg._push_undo()
 dlg.mask[:] = 0
 dlg.mask[h // 4:h * 3 // 4, w // 4:w * 3 // 4] = 255
